@@ -60,6 +60,7 @@
     
     UpdateDistance();
     UpdateTemperature(timePassed);
+    UpdateLCD();
     
     if(!door_open) {
       if(distance >= 0 && distance <= 60) 
@@ -111,6 +112,20 @@
       temperature = sensors.getTempCByIndex(0);
       temperatureDelay = 0;
     }
+  }
+  
+  void UpdateLCD()
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(temperature);
+    lcd.print(" C"); // 10 chars used
+    
+    // Debug
+    lcd.setCursor(0, 1);
+    lcd.print("Dist: ");
+    lcd.print(distance);
+    lcd.print(" cm");
   }
   
   void GetStatus(long plastimer, long poeptimer) 
