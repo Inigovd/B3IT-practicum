@@ -11,6 +11,7 @@
   #define triggerPin 9
   #define echoPin 10
   #define tempPin 8
+  #define doorPin A0
   
   //Variables
   int distance, temperature, uses_left;
@@ -60,6 +61,7 @@
     UpdateDistance();
     UpdateTemperature(timePassed);
     UpdateLCD();
+    UpdateDoor();
     
     if(!door_open) {
       if(distance >= 0 && distance <= 60) 
@@ -122,13 +124,24 @@
     lcd.setCursor(0, 0);
     lcd.print("Temp: ");
     lcd.print(temperature);
-    lcd.print(" C"); // 10 chars used
+    lcd.print(" C   "); // 10 chars used
     
     // Debug
     lcd.setCursor(0, 1);
     lcd.print("Dist: ");
     lcd.print(distance);
     lcd.print(" cm ");
+  }
+  
+  void UpdateDoor()
+  {
+    int analog = analogRead(doorPin);
+    temperature = analog;
+    if(analog < 500) {
+      door_open = true; 
+    } else {
+      door_open = false;
+    }
   }
   
   void GetStatus(long plastimer, long poeptimer) 
