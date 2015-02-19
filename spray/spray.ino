@@ -5,40 +5,35 @@
   #include <LiquidCrystal.h>
   #include <limits.h>
   
-  //Arduino pins
-  #define oneWireBus 2
-  #define motorPin 3
-  #define buttonPin 7
-  #define triggerPin 11
-  #define echoPin 12
+  //Arduino Digital pins
+  #define motorPin 7
+  #define buttonPin A5
+  #define triggerPin 9
+  #define echoPin 10
+  #define tempPin 8
   
   //Variables
   int distance, temperature, uses_left;
   enum Status { Kakken, Pissen, Schoonmaken, Idle };
   Status wc_status;
-  bool spray_needed, door_open;
+  bool spray_needed, door_open, manual_spray_needed;
   float plastimer, poeptimer;
   float temperatureDelay;
   unsigned long currentMillis;
   unsigned long previousMillis;
-  //LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
   
-  OneWire oneWire(oneWireBus);
+  LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+  OneWire oneWire(tempPin);
   DallasTemperature sensors(&oneWire);
   
   void interruptFunction() 
   {
-    // Activate motor pin
-    //lcd.setCursor(0, 0);
-    //lcd.print("Spraying...");
-    Serial.println("Trying to spray...");
-    int mosfet = digitalRead(2);
-    Serial.println(mosfet);  
-    digitalWrite(motorPin, HIGH);
+    manual_spray_needed = true;
   }
   
   void setup() {
     Serial.begin(9600);
+    lcd.begin(16, 2);
     
     pinMode(buttonPin, INPUT_PULLUP);
     pinMode(motorPin, OUTPUT);
@@ -53,11 +48,15 @@
     attachPinChangeInterrupt(buttonPin, interruptFunction, FALLING);
   }
   
+  /*
+  *----------------------*
+  * The Loop
+  *----------------------*
+  */
   void loop() 
   {
-    currentMillis = millis();
+    currentMillis = micros();
     unsigned long timePassed = currentMillis - previousMillis;
-    
     UpdateDistance();
     UpdateTemperature(timePassed);
     UpdateLCD();
@@ -80,22 +79,26 @@
     if(door_open && spray_needed) 
     {  
       GetStatus(plastimer, poeptimer);
-      Spray();
-    }  
+      Spray(false);
+    }
     
-    previousMillis = millis();
+    if(manual_spray_needed) {
+      Spray(true);
+    }
+    
+    previousMillis = micros();
   }
   
   void UpdateDistance()
   {
     digitalWrite(triggerPin, LOW);
-    delayMicroseconds(5);
+    delayMicroseconds(2);
     digitalWrite(triggerPin, HIGH);
-    delayMicroseconds(10);
+    delayMicroseconds(5);
     digitalWrite(triggerPin, LOW);
   
     pinMode(echoPin, INPUT);
-    float duration = pulseIn(echoPin, HIGH);
+    float duration = pulseIn(echoPin, HIGH, 10000);
   
     distance = (duration/2) / 29.1;
   }
@@ -108,9 +111,9 @@
     }
     else //Only update temperature every 2 seconds
     {
-      sensors.requestTemperatures();
-      temperature = sensors.getTempCByIndex(0);
-      temperatureDelay = 0;
+      // sensors.requestTemperatures();
+      // temperature = sensors.getTempCByIndex(0);
+      // temperatureDelay = 0;
     }
   }
   
@@ -125,7 +128,7 @@
     lcd.setCursor(0, 1);
     lcd.print("Dist: ");
     lcd.print(distance);
-    lcd.print(" cm");
+    lcd.print(" cm ");
   }
   
   void GetStatus(long plastimer, long poeptimer) 
@@ -143,15 +146,28 @@
     }    
   }
   
-  void Spray() {
+  void Spray(bool manual) {
     spray_needed = false;
     
+    if(manual) {
+       doSpray(1);
+       manual_spray_needed = false;
+       return;
+    }
     switch(wc_status) {
        case Kakken:
-         // Spray twice
+         doSpray(2);
        break;
        case Pissen:
-         // Spray once
+         doSpray(1);
        break;
     } 
+  }
+  
+  void doSpray(int amount) {
+    for(int t = 0; t < amount; t++) {
+      digitalWrite(motorPin, HIGH);
+      delay(500);
+      digitalWrite(motorPin, LOW);
+    }
   }
