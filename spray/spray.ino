@@ -1,11 +1,11 @@
   //Libraries
-  #include <DallasTemperature.h>
+  #include <EEPROM.h>
   #include <OneWire.h>
   #include <PinChangeInt.h>
   #include <LiquidCrystal.h>
   #include <limits.h>
   
-  //Arduino Digital pins
+  //Arduino pins
   #define motorPin 7
   #define triggerPin 9
   #define echoPin 10
@@ -14,18 +14,20 @@
   #define menuPin1 A2
   #define menuPin2 A3
   #define buttonPin A5
+  #define redLEDPin A1
+  #define greenLEDPin 6
   
   /*
   *----------------------*
   * Variables
   *----------------------*
   */
-  int distance, temperature, uses_left, menu_selection, spraycount;
+  int distance, temperature, uses_left, menu_selection, spraycount, ledFrequency;
   enum Status { in_use_unknown, in_use_one, in_use_two, in_use_cleaning, idle, triggered_spraying, in_menu };
   const char* StatusNames[6] = { "In use: unknown", "In use: #1", "In use: #2", "In use: cleaning", "Idle", "Spray shot imminent..." };
   Status wc_status;
-  bool spray_needed, door_open, manual_spray_needed;
-  unsigned long plastimer, poeptimer, idletimer, currentMillis, previousMillis, temperatureDelay;
+  bool spray_needed, door_open, manual_spray_needed, ledLightOn, manualSprayNeeded;
+  unsigned long numberOneTimer, numberTwoTimer, idletimer, currentMillis, previousMillis, temperatureDelay;
   int sprayDelayInterval[10] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
   int sprayDelayIndex = 0;
 
@@ -34,12 +36,11 @@
   int interrupt_timer = 0;
   
   LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
-  OneWire oneWire(tempPin);
-  DallasTemperature sensors(&oneWire);
+  OneWire ds(tempPin);
   
   /*
   *----------------------*
-  * Interrupts
+  * Interrupt functions
   *----------------------*
   */
   void manualSprayInterrupt() 
@@ -83,8 +84,11 @@
         break;
         case 1:
           spraycount = 2400;
+          writeSprayCount(spraycount);
         break;
       }
+    } else {
+      manual_spray_needed = true;
     }
   }
 
@@ -103,11 +107,14 @@
     //Define inputs and outputs for distance sensor
     pinMode(triggerPin, OUTPUT);
     pinMode(echoPin, INPUT);
-    
-    //Start up the temperature library
-    sensors.begin();
+
+    pinMode(redLEDPin, OUTPUT);
+    pinMode(greenLEDPin, OUTPUT);
     
     wc_status = idle;
+
+    // Read EEPROM
+    spraycount = readSprayCount();
     
     attachPinChangeInterrupt(buttonPin, manualSprayInterrupt, FALLING);
     attachPinChangeInterrupt(menuPin1, menuInterrupt, FALLING);
@@ -124,35 +131,36 @@
     currentMillis = micros();
     unsigned long timePassed = currentMillis - previousMillis;
     
+    // Interrupt timer takes care of debouncing
     if(interrupt_wait) {
       interrupt_timer += timePassed;
-      if(interrupt_timer > 5) {
+      if(interrupt_timer > 30) {
         interrupt_timer = 0;
         interrupt_wait = false;
       }
     }
-    // In menu
+
     if(wc_status == in_menu) {
       UpdateLCDMenu();
     } else {
-      // Not in menu
       UpdateDistance();
       UpdateTemperature(timePassed);
       UpdateLCD();
+      UpdateLEDs(timePassed);
       UpdateDoor();
-      GetStatus(plastimer, poeptimer);
+      GetStatus(numberOneTimer, numberTwoTimer);
 
       if(!door_open) {  // Toilet is going to be used
         if(distance > 0 && distance <= 80) 
         {
           spray_needed = true;
-          if(distance >= 30) 
-            plastimer += timePassed;
+          if(distance >= 50) 
+            numberOneTimer += timePassed; // "Number one"
           else 
-            poeptimer += timePassed;  
+            numberTwoTimer += timePassed; // "Number two"
         }
       } else if(door_open && !spray_needed) { // Cleaning
-        if(distance > 0) {
+        if(distance > 0 && distance < 60) {
           wc_status = in_use_cleaning;
           idletimer = 0;
         } else if(wc_status != idle) {
@@ -164,22 +172,22 @@
         }
       }
       
-      if(spray_needed) {
-       if((distance == 0 || distance > 80) && (wc_status == in_use_one || wc_status == in_use_two)) {
-         idletimer += timePassed;
-         if(idletimer > GetSprayDelay()) {
-           Spray(false);
-           idletimer = 0; 
-         }
-        }
+      // Spray after a delay if needed
+     if((distance == 0 || distance > 80) && (wc_status == in_use_one || wc_status == in_use_two) && spray_needed) {
+       idletimer += timePassed;
+       if(idletimer > GetSprayDelay()) {
+         Spray(false);
+         idletimer = 0; 
+       }
       }
 
-      if(manual_spray_needed) {
-        Spray(true);
-      }
     }
 
-    delay(50); // DEBUG
+    // Dedicated spray button
+    if(manual_spray_needed) {
+      Spray(true);
+    }
+
     previousMillis = micros();
   }
   
@@ -204,15 +212,14 @@
   
   void UpdateTemperature(unsigned long timePassed)
   {
-    if(temperatureDelay < 2000)
+    if(temperatureDelay < 200)
     {
       temperatureDelay += timePassed;
     }
     else // Only update temperature every 2 seconds
     {
-      // sensors.requestTemperatures();
-      // temperature = sensors.getTempCByIndex(0);
-      // temperatureDelay = 0;
+      getTemperature();
+      temperatureDelay = 0;
     }
   }
   
@@ -223,13 +230,10 @@
     lcd.print("                ");
     
     lcd.setCursor(0, 1);
-    lcd.print(idletimer);
-    lcd.print("                ");
-    /*
-    lcd.print("Temp: ");
     lcd.print(temperature);
-    lcd.print(" C   "); // 10 chars used
-    */
+    lcd.print("c ");
+    lcd.print("Sprays: ");
+    lcd.print(spraycount);
   }
 
   void UpdateLCDMenu()
@@ -255,7 +259,6 @@
   void UpdateDoor()
   {
     int analog = analogRead(doorPin);
-    temperature = analog;
     if(analog < 500) {
       door_open = false; 
     } else {
@@ -263,13 +266,52 @@
     }
   }
   
-  void GetStatus(long plastimer, long poeptimer) 
+  void UpdateLEDs(unsigned long timePassed)
   {
-    if(plastimer > poeptimer && plastimer > 500) {
+    ledFrequency += timePassed;
+    if(ledFrequency > 50)
+    {
+      ledLightOn = !ledLightOn;
+      ledFrequency = 0;
+    }
+    switch(wc_status) {
+      case idle:
+      case in_use_unknown:
+        analogWrite(redLEDPin, 0);
+        if(ledLightOn)
+          digitalWrite(greenLEDPin, HIGH);
+        else
+          digitalWrite(greenLEDPin, LOW);
+      break;
+      case in_use_cleaning:
+        analogWrite(redLEDPin, 0);
+        digitalWrite(greenLEDPin, HIGH);
+      break;
+      case in_use_one:
+        if(ledLightOn)
+          analogWrite(redLEDPin, 255);
+        else
+          analogWrite(redLEDPin, 0);
+        digitalWrite(greenLEDPin, LOW);
+      break;
+      case in_use_two:
+        analogWrite(redLEDPin, 255);
+        digitalWrite(greenLEDPin, LOW);
+      break;
+      default:
+        analogWrite(redLEDPin, 0);
+        digitalWrite(greenLEDPin, LOW);
+      break;
+    }
+  }
+
+  void GetStatus(long numberOneTimer, long numberTwoTimer) 
+  {
+    if(numberOneTimer > numberTwoTimer && numberOneTimer > 500) {
       wc_status = in_use_one;
-    } else if(poeptimer >= 2000) {
+    } else if(numberTwoTimer >= 2000) {
       wc_status = in_use_two;
-    } else if(poeptimer >= 500) {
+    } else if(numberTwoTimer >= 500) {
       wc_status = in_use_one;
     } else if(!door_open) {
       wc_status = in_use_unknown;
@@ -308,9 +350,12 @@
       delay(5000);
       digitalWrite(motorPin, LOW);
       delay(50);
+      spraycount--;
     }
-    
-    poeptimer = 0; plastimer = 0;
+
+    writeSprayCount(spraycount);
+
+    numberTwoTimer = 0; numberOneTimer = 0;
     wc_status = idle;
   }
 
@@ -318,6 +363,102 @@
   {
     return sprayDelayInterval[sprayDelayIndex] * 100;
   }
+
+  // From DS18x20_Temperature Example
+  // Needed because DallasTemperature.h's readSensors was a blocking function
+  void getTemperature()
+  {
+    byte i;
+    byte present = 0;
+    byte type_s;
+    byte data[12];
+    byte addr[8];
+    float celsius, fahrenheit;
+    
+    if ( !ds.search(addr)) {
+      ds.reset_search();
+      return;
+    }
+    
+    if (OneWire::crc8(addr, 7) != addr[7]) {
+      return;
+    }
+   
+    // the first ROM byte indicates which chip
+    switch (addr[0]) {
+      case 0x10:
+        type_s = 1;
+        break;
+      case 0x28:
+        type_s = 0;
+        break;
+      case 0x22:
+        type_s = 0;
+        break;
+      default:
+        return;
+    } 
+
+    ds.reset();
+    ds.select(addr);
+    ds.write(0x44, 1);        // start conversion, with parasite power on at the end
+    
+    present = ds.reset();
+    ds.select(addr);    
+    ds.write(0xBE);         // Read Scratchpad
+
+    for ( i = 0; i < 9; i++) {           // we need 9 bytes
+      data[i] = ds.read();
+    }
+
+    // Convert the data to actual temperature
+    // because the result is a 16 bit signed integer, it should
+    // be stored to an "int16_t" type, which is always 16 bits
+    // even when compiled on a 32 bit processor.
+    int16_t raw = (data[1] << 8) | data[0];
+    if (type_s) {
+      raw = raw << 3; // 9 bit resolution default
+      if (data[7] == 0x10) {
+        // "count remain" gives full 12 bit resolution
+        raw = (raw & 0xFFF0) + 12 - data[6];
+      }
+    } else {
+      byte cfg = (data[4] & 0x60);
+      // at lower res, the low bits are undefined, so let's zero them
+      if (cfg == 0x00) raw = raw & ~7;  // 9 bit resolution, 93.75 ms
+      else if (cfg == 0x20) raw = raw & ~3; // 10 bit res, 187.5 ms
+      else if (cfg == 0x40) raw = raw & ~1; // 11 bit res, 375 ms
+      //// default is 12 bit resolution, 750 ms conversion time
+    }
+    temperature = (int)raw / 16.0;
+  }
+
+  /*
+  *----------------------*
+  * EEPROM functions
+  *----------------------*
+  */
+  void writeSprayCount(int sprays)
+  {
+    int left = sprays >> 8;
+    int right = sprays;
+    EEPROM.write(0, left);
+    EEPROM.write(1, right);
+  }
+
+  int readSprayCount()
+  {
+    int left = EEPROM.read(0);
+    left = left << 8;
+    int right = EEPROM.read(1);
+
+    return left | right;
+  }
+
+
+
+
+
 
 
 
